@@ -113,6 +113,7 @@ jobs:
           android {
               namespace 'com.kieronquinn.app.smartspacer.sdk'
               compileSdk 37
+              buildToolsVersion "37.0.0"
 
               defaultConfig {
                   minSdk 29
@@ -174,6 +175,7 @@ jobs:
           android {
               namespace 'com.kieronquinn.app.smartspacer.sdk.client'
               compileSdk 37
+              buildToolsVersion "37.0.0"
 
               defaultConfig {
                   minSdk 29
@@ -208,9 +210,13 @@ jobs:
                           'soong'
                       ]
 
+                      # IMPORTANT:
+                      # Do not add ../sdk-core/src/main/aidl here.
+                      # sdk-core is already exposed through api project(':smartspacer-sdk-core'),
+                      # otherwise ParceledListSlice.aidl is compiled twice.
+
                       aidl.srcDirs = [
-                          'src/main/aidl',
-                          '../sdk-core/src/main/aidl'
+                          'src/main/aidl'
                       ]
 
                       res.srcDirs = [
@@ -306,20 +312,14 @@ jobs:
           dependency = "    implementation project(':smartspacer-sdk-client')"
 
           if dependency not in s:
-              # Insert before a dependency that is known to exist in the
-              # Gradle harness, avoiding reliance on sysui stub ordering.
               markers = [
                   "    implementation libs.androidx.core.ktx",
                   "    implementation libs.androidx.annotation",
-                  "dependencies {"
               ]
 
               inserted = False
 
               for marker in markers:
-                  if marker == "dependencies {":
-                      continue
-
                   if marker in s:
                       s = s.replace(
                           marker,
@@ -330,7 +330,6 @@ jobs:
                       break
 
               if not inserted:
-                  # Fallback: insert at the first dependencies block.
                   pos = s.find("dependencies {")
                   if pos < 0:
                       raise SystemExit(
@@ -386,8 +385,6 @@ jobs:
 
           done
 
-          # The harness already supplies these resources through dynamiccolors,
-          # but define a fallback in the app resource namespace as well.
           cat > res/values/standalone_private_resources.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
@@ -496,7 +493,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Replace unreliable Aliyun mirrors with official repositories.
           sed -i \
             "s#https://maven.aliyun.com/repository/google#OFFICIAL_GOOGLE_REPO#g" \
             settings.gradle
@@ -599,6 +595,10 @@ jobs:
           echo
           cat local.properties
 
+          echo
+          echo "=== Installed Android build tools ==="
+          ls -1 "$ANDROID_SDK_ROOT/build-tools"
+
       - name: Generate debug keystore
         shell: bash
         run: |
@@ -695,8 +695,22 @@ jobs:
           echo "=== Smartspacer modules ==="
 
           grep -n \
-            -E 'project|dependencies|implementation|api' \
+            -E 'buildToolsVersion|project|dependencies|implementation|api|aidl.srcDirs' \
+            smartspacer/sdk-core/build.gradle \
             smartspacer/sdk-client/build.gradle
+
+      - name: Verify Gradle configuration
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking Gradle configuration before full build..."
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            help
 
       - name: Build Launcher3QuickStep
         working-directory: launcher3-build
