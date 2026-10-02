@@ -76,6 +76,49 @@ jobs:
             uwu-launcher3/ \
             launcher3-build/
 
+      - name: Adapt widgetpicker resources to standalone app namespace
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Adapting widgetpicker R imports for merged application resources..."
+
+          changed=0
+
+          while IFS= read -r -d '' f; do
+            if grep -q \
+              'import com\.android\.launcher3\.widgetpicker\.R' \
+              "$f"; then
+
+              sed -i \
+                's/import com\.android\.launcher3\.widgetpicker\.R/import com.android.launcher3.R/g' \
+                "$f"
+
+              changed=$((changed + 1))
+              echo "Patched: $f"
+            fi
+          done < <(
+            find modules/widgetpicker/src \
+              -type f \
+              \( -name '*.kt' -o -name '*.java' \) \
+              -print0
+          )
+
+          echo "Changed widgetpicker source files: $changed"
+
+          if grep -RIn \
+            'import com\.android\.launcher3\.widgetpicker\.R' \
+            modules/widgetpicker/src \
+            --include='*.kt' \
+            --include='*.java'; then
+
+            echo "ERROR: widgetpicker R import still remains." >&2
+            exit 1
+          fi
+
+          echo "Widgetpicker R namespace adaptation complete."
+
       - name: Remove stale harness SettingsActivity
         working-directory: launcher3-build
         shell: bash
