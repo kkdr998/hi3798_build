@@ -76,15 +76,12 @@ jobs:
             uwu-launcher3/ \
             launcher3-build/
 
-      - name: Remove stale harness sources
+      - name: Remove stale harness SettingsActivity
         working-directory: launcher3-build
         shell: bash
         run: |
           set -euo pipefail
 
-          # The Gradle harness contains an older Java SettingsActivity.
-          # uwuAOSP supplies its own SettingsActivity.kt, so retaining both
-          # creates duplicate class com.android.launcher3.settings.SettingsActivity.
           STALE="src/com/android/launcher3/settings/SettingsActivity.java"
 
           if [ -f "$STALE" ]; then
@@ -100,7 +97,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Preparing uwuAOSP Smartspacer SDK modules..."
+          echo "Preparing Smartspacer SDK modules..."
 
           test -d smartspacer/sdk-core/src/main
           test -d smartspacer/sdk-client/src/main
@@ -120,7 +117,12 @@ jobs:
               defaultConfig {
                   minSdk 29
                   consumerProguardFiles "consumer-rules.pro"
-                  buildConfigField "String", "SMARTSPACER_PACKAGE_NAME", "\"com.kieronquinn.app.smartspacer\""
+
+                  buildConfigField(
+                      "String",
+                      "SMARTSPACER_PACKAGE_NAME",
+                      "\"com.kieronquinn.app.smartspacer\""
+                  )
               }
 
               buildFeatures {
@@ -143,9 +145,11 @@ jobs:
                           'src/main/java',
                           'soong'
                       ]
+
                       aidl.srcDirs = [
                           'src/main/aidl'
                       ]
+
                       manifest.srcFile 'src/main/AndroidManifest.xml'
                   }
               }
@@ -174,7 +178,12 @@ jobs:
               defaultConfig {
                   minSdk 29
                   consumerProguardFiles "consumer-rules.pro"
-                  buildConfigField "int", "SDK_VERSION", "3"
+
+                  buildConfigField(
+                      "int",
+                      "SDK_VERSION",
+                      "3"
+                  )
               }
 
               buildFeatures {
@@ -198,13 +207,16 @@ jobs:
                           'src/main/java',
                           'soong'
                       ]
+
                       aidl.srcDirs = [
                           'src/main/aidl',
                           '../sdk-core/src/main/aidl'
                       ]
+
                       res.srcDirs = [
                           'src/main/res'
                       ]
+
                       manifest.srcFile 'src/main/AndroidManifest.xml'
                   }
               }
@@ -220,8 +232,10 @@ jobs:
               implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.10.0'
               implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0'
 
-              # uwuAOSP carries its own Balloon 1.6.13 AAR.
-              implementation files("${rootProject.projectDir}/smartspacer/balloon/balloon-1.6.13.aar")
+              // uwuAOSP includes Balloon 1.6.13 locally.
+              implementation files(
+                  "${rootProject.projectDir}/smartspacer/balloon/balloon-1.6.13.aar"
+              )
           }
 
           tasks.withType(Jar).configureEach {
@@ -229,7 +243,7 @@ jobs:
           }
           EOF
 
-          echo "Smartspacer modules prepared."
+          echo "Smartspacer Gradle modules created."
 
       - name: Configure Smartspacer modules
         working-directory: launcher3-build
@@ -257,18 +271,27 @@ jobs:
           """
 
           if "include ':smartspacer-sdk-core'" not in s:
-              s = s.replace(marker, additions + "\n" + marker, 1)
+              if marker not in s:
+                  raise SystemExit(
+                      "Could not find rootProject.name in settings.gradle"
+                  )
+
+              s = s.replace(
+                  marker,
+                  additions + "\n" + marker,
+                  1
+              )
 
           p.write_text(s)
           PY
 
-          echo "=== Smartspacer settings ==="
+          echo "=== Smartspacer project configuration ==="
 
           grep -n \
             -E 'smartspacer-sdk-core|smartspacer-sdk-client' \
             settings.gradle
 
-      - name: Patch Launcher3 Smartspacer dependency
+      - name: Add Smartspacer dependency to Launcher3
         working-directory: launcher3-build
         shell: bash
         run: |
@@ -280,28 +303,47 @@ jobs:
           p = Path("build.gradle")
           s = p.read_text()
 
-          anchor = "    implementation project(':sysui_anim_stub')"
+          dependency = "    implementation project(':smartspacer-sdk-client')"
 
-          addition = """
-          implementation project(':smartspacer-sdk-client')
-          """
+          if dependency not in s:
+              # Insert before a dependency that is known to exist in the
+              # Gradle harness, avoiding reliance on sysui stub ordering.
+              markers = [
+                  "    implementation libs.androidx.core.ktx",
+                  "    implementation libs.androidx.annotation",
+                  "dependencies {"
+              ]
 
-          if "implementation project(':smartspacer-sdk-client')" not in s:
-              if anchor not in s:
-                  raise SystemExit(
-                      "Could not find dependency insertion point in build.gradle"
-                  )
+              inserted = False
 
-              s = s.replace(
-                  anchor,
-                  anchor + addition,
-                  1
-              )
+              for marker in markers:
+                  if marker == "dependencies {":
+                      continue
+
+                  if marker in s:
+                      s = s.replace(
+                          marker,
+                          dependency + "\n" + marker,
+                          1
+                      )
+                      inserted = True
+                      break
+
+              if not inserted:
+                  # Fallback: insert at the first dependencies block.
+                  pos = s.find("dependencies {")
+                  if pos < 0:
+                      raise SystemExit(
+                          "Could not find dependencies block in build.gradle"
+                      )
+
+                  pos = pos + len("dependencies {")
+                  s = s[:pos] + "\n" + dependency + s[pos:]
 
           p.write_text(s)
           PY
 
-          echo "=== Smartspacer dependency ==="
+          echo "=== Launcher3 Smartspacer dependency ==="
 
           grep -n \
             "smartspacer-sdk-client" \
@@ -313,11 +355,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Patching private androidprv resource references..."
+          echo "Mapping AOSP private resources to standalone equivalents..."
 
-          # Standalone Gradle builds do not expose AOSP's private
-          # androidprv framework resource namespace. Map these references
-          # to equivalent resources already supplied by the harness.
           find . \
             -type f \
             -name "*.xml" \
@@ -347,8 +386,19 @@ jobs:
 
           done
 
+          # The harness already supplies these resources through dynamiccolors,
+          # but define a fallback in the app resource namespace as well.
+          cat > res/values/standalone_private_resources.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="shade_panel_bg">#523C4043</color>
+              <color name="shade_panel_fg">#E6FFFFFF</color>
+              <color name="shade_panel_scrim_color">#99000000</color>
+          </resources>
+          EOF
+
           echo
-          echo "=== Remaining androidprv references ==="
+          echo "=== Remaining private resource references ==="
 
           grep -RIn \
             'androidprv:' \
@@ -356,26 +406,7 @@ jobs:
             --include='*.xml' \
             --exclude-dir=.git || true
 
-          # Define the private color names in the application namespace when
-          # they are not already supplied by the merged resources.
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path("res/values/standalone_private_resources.xml")
-          p.parent.mkdir(parents=True, exist_ok=True)
-
-          p.write_text("""<?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <color name="shade_panel_bg">#523C4043</color>
-              <color name="shade_panel_fg">#E6FFFFFF</color>
-              <color name="shade_panel_scrim_color">#99000000</color>
-          </resources>
-          """)
-          PY
-
-          echo "Private resource compatibility layer prepared."
-
-      - name: Fix Android 17 manifest for AGP 9
+      - name: Fix Android 17 main manifest for AGP 9
         working-directory: launcher3-build
         shell: bash
         run: |
@@ -387,7 +418,10 @@ jobs:
           p = Path("AndroidManifest.xml")
           s = p.read_text()
 
-          old = '<uses-sdk android:targetSdkVersion="33" android:minSdkVersion="30"'
+          old = (
+              '<uses-sdk android:targetSdkVersion="33" '
+              'android:minSdkVersion="30"'
+          )
 
           if old in s:
               s = s.replace(
@@ -399,7 +433,7 @@ jobs:
           p.write_text(s)
           PY
 
-          echo "=== Main manifest SDK declaration ==="
+          echo "=== Main manifest ==="
           grep -n "uses-sdk" AndroidManifest.xml || true
 
       - name: Remove unsupported AAPT feature flags
@@ -408,7 +442,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Removing android:featureFlag attributes..."
+          echo "Removing standalone-build-incompatible android:featureFlag attributes..."
 
           python3 - <<'PY'
           from pathlib import Path
@@ -440,7 +474,7 @@ jobs:
 
           print(
               f"Changed XML files: {changed}; "
-              f"removed attributes: {removed}"
+              f"removed featureFlag attributes: {removed}"
           )
           PY
 
@@ -462,12 +496,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "=== Original repositories ==="
-
-          grep -n -E \
-            'maven.aliyun.com|repositories[[:space:]]*\{|google\(\)|mavenCentral\(\)|gradlePluginPortal\(\)' \
-            settings.gradle || true
-
+          # Replace unreliable Aliyun mirrors with official repositories.
           sed -i \
             "s#https://maven.aliyun.com/repository/google#OFFICIAL_GOOGLE_REPO#g" \
             settings.gradle
@@ -492,9 +521,7 @@ jobs:
             "s#maven { url 'OFFICIAL_GRADLE_PLUGIN_REPO' }#gradlePluginPortal()#g" \
             settings.gradle
 
-          echo
-          echo "=== Patched repositories ==="
-
+          echo "=== Gradle repositories ==="
           cat settings.gradle
 
           echo
@@ -510,8 +537,6 @@ jobs:
             echo "ERROR: Aliyun Maven repository remains." >&2
             exit 1
           fi
-
-          echo "No Aliyun Maven repository references remain."
 
       - name: Set up Java 21
         uses: actions/setup-java@v5
@@ -565,7 +590,7 @@ jobs:
           EOF
 
           echo
-          echo "=== Android configuration ==="
+          echo "=== Android build configuration ==="
 
           grep -nE \
             'compileSdk|buildToolsVersion' \
@@ -585,6 +610,8 @@ jobs:
           mkdir -p "$DEBUG_DIR"
 
           if [ ! -s "$DEBUG_KEYSTORE" ]; then
+            echo "Generating debug keystore..."
+
             keytool \
               -genkeypair \
               -v \
@@ -622,8 +649,6 @@ jobs:
             --pkg com.android.launcher3 \
             --appId com.android.launcher3 \
             > generated-src/com/android/launcher3/BuildConfig.java
-
-          echo "=== BuildConfig ==="
 
           sed -n '1,120p' \
             generated-src/com/android/launcher3/BuildConfig.java
@@ -663,16 +688,15 @@ jobs:
 
           test -f smartspacer/sdk-core/build.gradle
           test -f smartspacer/sdk-client/build.gradle
-          test -f smartspacer/sdk-client/src/main/AndroidManifest.xml
           test -f smartspacer/sdk-core/src/main/AndroidManifest.xml
+          test -f smartspacer/sdk-client/src/main/AndroidManifest.xml
           test -s smartspacer/balloon/balloon-1.6.13.aar
 
-          echo "Smartspacer SDK modules:"
-          find smartspacer \
-            -maxdepth 3 \
-            -type f \
-            \( -name "*.aar" -o -name "build.gradle" \) \
-            -print
+          echo "=== Smartspacer modules ==="
+
+          grep -n \
+            -E 'project|dependencies|implementation|api' \
+            smartspacer/sdk-client/build.gradle
 
       - name: Build Launcher3QuickStep
         working-directory: launcher3-build
