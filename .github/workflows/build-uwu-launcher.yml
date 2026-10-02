@@ -30,7 +30,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth=1 https://github.com/yuchuangu85/Launcher3.git launcher3-build
+
+          git clone --depth=1 \
+            https://github.com/yuchuangu85/Launcher3.git \
+            launcher3-build
 
       - name: Fetch exact uwuAOSP Launcher3 source
         shell: bash
@@ -70,6 +73,62 @@ jobs:
             --exclude='.git/' \
             uwu-launcher3/ \
             launcher3-build/
+
+      - name: Fix Gradle repositories
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Original Gradle repository configuration ==="
+          grep -n -E \
+            'maven.aliyun.com|repositories[[:space:]]*\{|google\(\)|mavenCentral\(\)|gradlePluginPortal\(\)' \
+            settings.gradle || true
+
+          # yuchuangu85/Launcher3 使用了 Aliyun 镜像。
+          # 当前 Actions 环境访问该镜像可能返回 502，
+          # 因此统一切换到官方/标准 Maven 仓库。
+          sed -i \
+            "s#https://maven.aliyun.com/repository/google#OFFICIAL_GOOGLE_REPO#g" \
+            settings.gradle
+
+          sed -i \
+            "s#https://maven.aliyun.com/repository/central#OFFICIAL_CENTRAL_REPO#g" \
+            settings.gradle
+
+          sed -i \
+            "s#https://maven.aliyun.com/repository/gradle-plugin#OFFICIAL_GRADLE_PLUGIN_REPO#g" \
+            settings.gradle
+
+          sed -i \
+            "s#maven { url 'OFFICIAL_GOOGLE_REPO' }#google()#g" \
+            settings.gradle
+
+          sed -i \
+            "s#maven { url 'OFFICIAL_CENTRAL_REPO' }#mavenCentral()#g" \
+            settings.gradle
+
+          sed -i \
+            "s#maven { url 'OFFICIAL_GRADLE_PLUGIN_REPO' }#gradlePluginPortal()#g" \
+            settings.gradle
+
+          echo
+          echo "=== Patched Gradle repository configuration ==="
+          cat settings.gradle
+
+          echo
+          echo "=== Checking for remaining Aliyun mirrors ==="
+          if grep -RIn \
+            "maven.aliyun.com/repository" \
+            . \
+            --exclude-dir=.git \
+            --exclude='*.jar' \
+            --exclude='*.aar'; then
+            echo "ERROR: Aliyun repository reference still exists." >&2
+            exit 1
+          fi
+
+          echo "No Aliyun Maven repository references remain."
 
       - name: Set up Java 21
         uses: actions/setup-java@v5
@@ -112,6 +171,8 @@ jobs:
             's/buildToolsVersion[[:space:]]*"37\.0\.0"/buildToolsVersion "36.0.0"/g' \
             build.gradle
 
+          echo
+          echo "=== Android SDK configuration ==="
           grep -nE 'compileSdk|buildToolsVersion' build.gradle
 
       - name: Set up Gradle 9.7.1
@@ -134,6 +195,10 @@ jobs:
             --pkg com.android.launcher3 \
             --appId com.android.launcher3 \
             > generated-src/com/android/launcher3/BuildConfig.java
+
+          echo "Generated:"
+          sed -n '1,120p' \
+            generated-src/com/android/launcher3/BuildConfig.java
 
       - name: Check framework prebuilts
         working-directory: launcher3-build
@@ -160,6 +225,7 @@ jobs:
             }
           done
 
+          echo "=== Framework prebuilts ==="
           ls -lh prebuilts/framework/
 
       - name: Build Launcher3QuickStep
@@ -183,6 +249,8 @@ jobs:
               ;;
           esac
 
+          echo "Building Gradle task: $TASK"
+
           gradle \
             --no-daemon \
             --stacktrace \
@@ -194,6 +262,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "=== APK files ==="
 
           find build/outputs/apk \
             -type f \
