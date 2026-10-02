@@ -107,12 +107,11 @@ jobs:
           plugins {
               id 'com.android.library'
               id 'org.jetbrains.kotlin.android'
-              id 'kotlin-parcelize'
           }
 
           android {
               namespace 'com.kieronquinn.app.smartspacer.sdk'
-              compileSdk 37
+              compileSdkVersion 37
               buildToolsVersion "37.0.0"
 
               defaultConfig {
@@ -139,29 +138,18 @@ jobs:
               kotlinOptions {
                   jvmTarget = '17'
               }
-
-              sourceSets {
-                  main {
-                      java.srcDirs = [
-                          'src/main/java',
-                          'soong'
-                      ]
-
-                      aidl.srcDirs = [
-                          'src/main/aidl'
-                      ]
-
-                      manifest.srcFile 'src/main/AndroidManifest.xml'
-                  }
-              }
           }
 
           dependencies {
-              implementation 'androidx.core:core-ktx:1.19.0'
+              implementation "androidx.core:core-ktx:1.19.0"
           }
 
           tasks.withType(Jar).configureEach {
               duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+              exclude { details ->
+                  details.file.absolutePath.contains("generated") &&
+                      details.name == "ParceledListSlice.java"
+              }
           }
           EOF
 
@@ -169,12 +157,11 @@ jobs:
           plugins {
               id 'com.android.library'
               id 'org.jetbrains.kotlin.android'
-              id 'kotlin-parcelize'
           }
 
           android {
               namespace 'com.kieronquinn.app.smartspacer.sdk.client'
-              compileSdk 37
+              compileSdkVersion 37
               buildToolsVersion "37.0.0"
 
               defaultConfig {
@@ -202,30 +189,6 @@ jobs:
               kotlinOptions {
                   jvmTarget = '17'
               }
-
-              sourceSets {
-                  main {
-                      java.srcDirs = [
-                          'src/main/java',
-                          'soong'
-                      ]
-
-                      # IMPORTANT:
-                      # Do not add ../sdk-core/src/main/aidl here.
-                      # sdk-core is already exposed through api project(':smartspacer-sdk-core'),
-                      # otherwise ParceledListSlice.aidl is compiled twice.
-
-                      aidl.srcDirs = [
-                          'src/main/aidl'
-                      ]
-
-                      res.srcDirs = [
-                          'src/main/res'
-                      ]
-
-                      manifest.srcFile 'src/main/AndroidManifest.xml'
-                  }
-              }
           }
 
           dependencies {
@@ -238,7 +201,6 @@ jobs:
               implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.10.0'
               implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0'
 
-              // uwuAOSP includes Balloon 1.6.13 locally.
               implementation files(
                   "${rootProject.projectDir}/smartspacer/balloon/balloon-1.6.13.aar"
               )
@@ -336,7 +298,7 @@ jobs:
                           "Could not find dependencies block in build.gradle"
                       )
 
-                  pos = pos + len("dependencies {")
+                  pos += len("dependencies {")
                   s = s[:pos] + "\n" + dependency + s[pos:]
 
           p.write_text(s)
@@ -695,7 +657,7 @@ jobs:
           echo "=== Smartspacer modules ==="
 
           grep -n \
-            -E 'buildToolsVersion|project|dependencies|implementation|api|aidl.srcDirs' \
+            -E 'compileSdkVersion|buildToolsVersion|dependencies|implementation|api' \
             smartspacer/sdk-core/build.gradle \
             smartspacer/sdk-client/build.gradle
 
