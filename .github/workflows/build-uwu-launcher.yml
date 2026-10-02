@@ -27,14 +27,23 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout Gradle build harness
+      - name: Checkout pinned Gradle build harness
         shell: bash
         run: |
           set -euo pipefail
 
-          git clone --depth=1 \
-            https://github.com/yuchuangu85/Launcher3.git \
-            launcher3-build
+          HARNESS_SHA="39c232d7e4166daebee06f9e3961c5edd1cc6a15"
+
+          git init launcher3-build
+          cd launcher3-build
+
+          git remote add origin \
+            https://github.com/yuchuangu85/Launcher3.git
+
+          git fetch --depth=1 origin "$HARNESS_SHA"
+          git checkout --detach FETCH_HEAD
+
+          echo "HARNESS_SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Fetch exact uwuAOSP Launcher3 source
         shell: bash
@@ -64,7 +73,7 @@ jobs:
 
           echo
           echo "=== Gradle build harness ==="
-          echo "SHA: $(git -C launcher3-build rev-parse HEAD)"
+          echo "SHA: ${HARNESS_SOURCE_SHA}"
 
       - name: Overlay uwuAOSP Launcher3 source
         shell: bash
@@ -75,6 +84,41 @@ jobs:
             --exclude='.git/' \
             uwu-launcher3/ \
             launcher3-build/
+
+      - name: Audit uwuAOSP source before compatibility patches
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Required uwuAOSP resources/source ==="
+
+          required_paths=(
+            "res/values/uwu_dimens.xml"
+            "res/xml/uwu_device_profiles.xml"
+            "res/layout/hotseat_page.xml"
+            "res/values/strings.xml"
+            "modules/widgetpicker/res"
+            "smartspacer/sdk-core/src/main/aidl"
+            "smartspacer/sdk-client/soong"
+            "quickstep/src/com/android/quickstep/SystemUiProxy.kt"
+          )
+
+          for p in "${required_paths[@]}"; do
+            if [ ! -e "$p" ]; then
+              echo "ERROR: missing required source path: $p" >&2
+              exit 1
+            fi
+            echo "OK: $p"
+          done
+
+          if grep -RIn \
+            'submit(Callable { provider(impl) }).get()' \
+            quickstep \
+            --include='*.kt'; then
+            echo "ERROR: old TaskbarManagerImplWrapper implementation detected." >&2
+            exit 1
+          fi
 
       - name: Adapt widgetpicker resources to standalone app namespace
         working-directory: launcher3-build
@@ -143,7 +187,9 @@ jobs:
           echo "Preparing Smartspacer SDK modules..."
 
           test -d smartspacer/sdk-core/src/main
+          test -d smartspacer/sdk-core/src/main/aidl
           test -d smartspacer/sdk-client/src/main
+          test -d smartspacer/sdk-client/soong
           test -s smartspacer/balloon/balloon-1.6.13.aar
 
           cat > smartspacer/sdk-core/build.gradle <<'EOF'
@@ -181,6 +227,15 @@ jobs:
 
               kotlinOptions {
                   jvmTarget = '17'
+              }
+
+              sourceSets {
+                  main {
+                      java.srcDirs = [
+                          'src/main/java',
+                          'soong'
+                      ]
+                  }
               }
           }
 
@@ -233,6 +288,18 @@ jobs:
 
               kotlinOptions {
                   jvmTarget = '17'
+              }
+
+              sourceSets {
+                  main {
+                      java.srcDirs = [
+                          'src/main/java',
+                          'soong'
+                      ]
+                      res.srcDirs = [
+                          'src/main/res'
+                      ]
+                  }
               }
           }
 
@@ -349,11 +416,205 @@ jobs:
           p.write_text(s)
           PY
 
-          echo "=== Launcher3 Smartspacer dependency ==="
-
           grep -n \
             "smartspacer-sdk-client" \
             build.gradle
+
+      - name: Add uwu root resources to main resource graph
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("build.gradle")
+          s = p.read_text()
+
+          marker = """            res.srcDirs = [
+                'modules/widgetpicker/res',
+                'platform_frameworks_libs/frameworks_libs_systemui/dynamiccolors/res',
+                'platform_frameworks_libs/settingslib_theme_res/res'
+            ]"""
+
+          replacement = """            res.srcDirs = [
+                'res',
+                'modules/widgetpicker/res',
+                'platform_frameworks_libs/frameworks_libs_systemui/dynamiccolors/res',
+                'platform_frameworks_libs/settingslib_theme_res/res'
+            ]"""
+
+          if marker not in s:
+              raise SystemExit(
+                  "Could not find main res.srcDirs block in build.gradle"
+              )
+
+          s = s.replace(marker, replacement, 1)
+
+          p.write_text(s)
+          PY
+
+          echo "=== Main resource directories ==="
+          sed -n '/res.srcDirs = \[/,/^            \]/p' build.gradle | head -20
+
+          test -f res/values/uwu_dimens.xml
+          test -f res/xml/uwu_device_profiles.xml
+          test -f res/layout/hotseat_page.xml
+
+      - name: Enable Kotlin JVM default compatibility
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("build.gradle")
+          s = p.read_text()
+
+          old = """    kotlinOptions {
+        jvmTarget = '21'
+    }"""
+
+          new = """    kotlinOptions {
+        jvmTarget = '21'
+        freeCompilerArgs += ['-Xjvm-default=all']
+    }"""
+
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif "-Xjvm-default=all" not in s:
+              raise SystemExit(
+                  "Could not find root kotlinOptions block."
+              )
+
+          p.write_text(s)
+          PY
+
+          grep -n \
+            -A4 -B1 \
+            'kotlinOptions' \
+            build.gradle | head -12
+
+      - name: Patch TaskbarManagerImplWrapper for Kotlin 2.4
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="quickstep/src/com/android/launcher3/taskbar/TaskbarManagerImplWrapper.kt"
+
+          if [ ! -f "$FILE" ]; then
+            FILE="$(find quickstep -name 'TaskbarManagerImplWrapper.kt' -print -quit)"
+          fi
+
+          if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
+            echo "ERROR: TaskbarManagerImplWrapper.kt not found." >&2
+            exit 1
+          fi
+
+          echo "Patching: $FILE"
+
+          python3 - "$FILE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+
+          old = """    @VisibleForTesting
+    override fun <T> getFromImplSync(provider: (TaskbarManagerImpl) -> T): T =
+        getTaskbarUiThread().submit(Callable { provider(impl) }).get()
+          """
+
+          new = """    @VisibleForTesting
+    override fun <T> getFromImplSync(
+        provider: (TaskbarManagerImpl) -> T
+    ): T {
+        val future = FutureTask(Callable<T> { provider(impl) })
+        getTaskbarUiThread().execute(future)
+        return future.get()
+    }
+          """
+
+          if old not in s:
+              if "FutureTask(Callable<T>" in s:
+                  print("Taskbar patch already present.")
+                  sys.exit(0)
+
+              print(
+                  "ERROR: expected old getFromImplSync implementation not found.",
+                  file=sys.stderr
+              )
+              sys.exit(1)
+
+          s = s.replace(old, new, 1)
+
+          if "import java.util.concurrent.FutureTask" not in s:
+              needle = "import java.util.concurrent.Callable"
+              if needle not in s:
+                  raise SystemExit(
+                      "Could not find java.util.concurrent.Callable import."
+                  )
+
+              s = s.replace(
+                  needle,
+                  needle + "\nimport java.util.concurrent.FutureTask",
+                  1
+              )
+
+          p.write_text(s)
+          PY
+
+          if grep -n \
+            'submit(Callable { provider(impl) }).get()' \
+            "$FILE"; then
+
+            echo "ERROR: old submit implementation remains." >&2
+            exit 1
+          fi
+
+          grep -n \
+            -A8 \
+            'getFromImplSync' \
+            "$FILE"
+
+      - name: Add SystemUiProxy compatibility shim
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SHIM="quickstep/src/com/android/quickstep/SystemUiProxyCompat.kt"
+
+          cat > "$SHIM" <<'EOF'
+          /* Standalone compatibility shim for newer uwuAOSP SystemUI proxy calls. */
+          package com.android.quickstep
+
+          import com.android.systemui.shared.recents.ISystemUiProxy
+
+          fun ISystemUiProxy.onNavHandleDoubleTap(
+              displayId: Int,
+              taskId: Int,
+          ) {
+              try {
+                  javaClass.getMethod(
+                      "onNavHandleDoubleTap",
+                      Int::class.javaPrimitiveType!!,
+                      Int::class.javaPrimitiveType!!,
+                  ).invoke(this, displayId, taskId)
+              } catch (_: NoSuchMethodException) {
+                  // Older SystemUISharedLib: no-op.
+              }
+          }
+          EOF
+
+          test -s "$SHIM"
+
+          echo "Created compatibility shim:"
+          cat "$SHIM"
 
       - name: Fix Android private resources
         working-directory: launcher3-build
@@ -697,14 +958,94 @@ jobs:
           test -f smartspacer/sdk-client/build.gradle
           test -f smartspacer/sdk-core/src/main/AndroidManifest.xml
           test -f smartspacer/sdk-client/src/main/AndroidManifest.xml
+          test -d smartspacer/sdk-core/src/main/aidl
+          test -d smartspacer/sdk-core/soong
+          test -d smartspacer/sdk-client/soong
           test -s smartspacer/balloon/balloon-1.6.13.aar
 
           echo "=== Smartspacer modules ==="
 
           grep -n \
-            -E 'compileSdkVersion|buildToolsVersion|kotlin-parcelize|dependencies|implementation|api' \
+            -E 'compileSdkVersion|buildToolsVersion|kotlin-parcelize|sourceSets|dependencies|implementation|api' \
             smartspacer/sdk-core/build.gradle \
             smartspacer/sdk-client/build.gradle
+
+      - name: Final compatibility audit
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Final resource audit ==="
+
+          for f in \
+            res/values/uwu_dimens.xml \
+            res/xml/uwu_device_profiles.xml \
+            res/layout/hotseat_page.xml \
+            res/values/strings.xml; do
+            test -s "$f" || {
+              echo "Missing resource: $f" >&2
+              exit 1
+            }
+          done
+
+          echo
+          echo "=== QuickStep compatibility audit ==="
+
+          test -s \
+            quickstep/src/com/android/quickstep/SystemUiProxyCompat.kt
+
+          if grep -RIn \
+            'onNavHandleDoubleTap' \
+            quickstep/src/com/android/quickstep/SystemUiProxy.kt; then
+            echo "uwuAOSP SystemUiProxy call present."
+          else
+            echo "ERROR: expected onNavHandleDoubleTap call not found." >&2
+            exit 1
+          fi
+
+          echo
+          echo "=== Taskbar compatibility audit ==="
+
+          if grep -RIn \
+            'submit(Callable { provider(impl) }).get()' \
+            quickstep \
+            --include='*.kt'; then
+            echo "ERROR: incompatible Taskbar implementation remains." >&2
+            exit 1
+          fi
+
+          grep -RIn \
+            'FutureTask(Callable<T>' \
+            quickstep \
+            --include='*.kt'
+
+          echo
+          echo "=== Feature flag audit ==="
+
+          if grep -RIn \
+            'android:featureFlag=' \
+            . \
+            --include='*.xml' \
+            --exclude-dir=.git; then
+            echo "ERROR: android:featureFlag remains." >&2
+            exit 1
+          fi
+
+          echo
+          echo "=== Private resource audit ==="
+
+          if grep -RIn \
+            'androidprv:' \
+            . \
+            --include='*.xml' \
+            --exclude-dir=.git; then
+            echo "ERROR: androidprv resource references remain." >&2
+            exit 1
+          fi
+
+          echo
+          echo "Final compatibility audit passed."
 
       - name: Verify Gradle configuration
         working-directory: launcher3-build
@@ -744,6 +1085,7 @@ jobs:
 
           gradle \
             --no-daemon \
+            --rerun-tasks \
             --stacktrace \
             --warning-mode all \
             "$TASK"
