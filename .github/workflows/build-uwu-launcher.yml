@@ -59,11 +59,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "uwuAOSP Launcher3:"
-          echo "  SHA: ${UWU_SOURCE_SHA}"
+          echo "=== uwuAOSP Launcher3 ==="
+          echo "SHA: ${UWU_SOURCE_SHA}"
 
-          echo "Gradle build harness:"
-          echo "  SHA: $(git -C launcher3-build rev-parse HEAD)"
+          echo
+          echo "=== Gradle build harness ==="
+          echo "SHA: $(git -C launcher3-build rev-parse HEAD)"
 
       - name: Overlay uwuAOSP Launcher3 source
         shell: bash
@@ -75,64 +76,310 @@ jobs:
             uwu-launcher3/ \
             launcher3-build/
 
-      - name: Fix Android 17 manifests and feature flags
+      - name: Remove stale harness sources
         working-directory: launcher3-build
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=== Removing unsupported android:featureFlag attributes ==="
+          # The Gradle harness contains an older Java SettingsActivity.
+          # uwuAOSP supplies its own SettingsActivity.kt, so retaining both
+          # creates duplicate class com.android.launcher3.settings.SettingsActivity.
+          STALE="src/com/android/launcher3/settings/SettingsActivity.java"
+
+          if [ -f "$STALE" ]; then
+            echo "Removing stale harness source: $STALE"
+            rm -f "$STALE"
+          fi
+
+          test ! -e "$STALE"
+
+      - name: Prepare Smartspacer Gradle modules
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Preparing uwuAOSP Smartspacer SDK modules..."
+
+          test -d smartspacer/sdk-core/src/main
+          test -d smartspacer/sdk-client/src/main
+          test -s smartspacer/balloon/balloon-1.6.13.aar
+
+          cat > smartspacer/sdk-core/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.library'
+              id 'org.jetbrains.kotlin.android'
+              id 'kotlin-parcelize'
+          }
+
+          android {
+              namespace 'com.kieronquinn.app.smartspacer.sdk'
+              compileSdk 37
+
+              defaultConfig {
+                  minSdk 29
+                  consumerProguardFiles "consumer-rules.pro"
+                  buildConfigField "String", "SMARTSPACER_PACKAGE_NAME", "\"com.kieronquinn.app.smartspacer\""
+              }
+
+              buildFeatures {
+                  aidl true
+                  buildConfig true
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+
+              sourceSets {
+                  main {
+                      java.srcDirs = [
+                          'src/main/java',
+                          'soong'
+                      ]
+                      aidl.srcDirs = [
+                          'src/main/aidl'
+                      ]
+                      manifest.srcFile 'src/main/AndroidManifest.xml'
+                  }
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.19.0'
+          }
+
+          tasks.withType(Jar).configureEach {
+              duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+          }
+          EOF
+
+          cat > smartspacer/sdk-client/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.library'
+              id 'org.jetbrains.kotlin.android'
+              id 'kotlin-parcelize'
+          }
+
+          android {
+              namespace 'com.kieronquinn.app.smartspacer.sdk.client'
+              compileSdk 37
+
+              defaultConfig {
+                  minSdk 29
+                  consumerProguardFiles "consumer-rules.pro"
+                  buildConfigField "int", "SDK_VERSION", "3"
+              }
+
+              buildFeatures {
+                  viewBinding true
+                  aidl true
+                  buildConfig true
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+
+              sourceSets {
+                  main {
+                      java.srcDirs = [
+                          'src/main/java',
+                          'soong'
+                      ]
+                      aidl.srcDirs = [
+                          'src/main/aidl',
+                          '../sdk-core/src/main/aidl'
+                      ]
+                      res.srcDirs = [
+                          'src/main/res'
+                      ]
+                      manifest.srcFile 'src/main/AndroidManifest.xml'
+                  }
+              }
+          }
+
+          dependencies {
+              api project(':smartspacer-sdk-core')
+
+              implementation 'androidx.core:core-ktx:1.19.0'
+              implementation 'androidx.fragment:fragment-ktx:1.8.9'
+              implementation 'androidx.constraintlayout:constraintlayout:2.2.1'
+              implementation 'androidx.lifecycle:lifecycle-service:2.10.0'
+              implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.10.0'
+              implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0'
+
+              # uwuAOSP carries its own Balloon 1.6.13 AAR.
+              implementation files("${rootProject.projectDir}/smartspacer/balloon/balloon-1.6.13.aar")
+          }
+
+          tasks.withType(Jar).configureEach {
+              duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+          }
+          EOF
+
+          echo "Smartspacer modules prepared."
+
+      - name: Configure Smartspacer modules
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
 
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
-          files_changed = 0
-          attributes_removed = 0
+          p = Path("settings.gradle")
+          s = p.read_text()
 
-          for p in Path(".").rglob("*.xml"):
-              if ".git" in p.parts:
-                  continue
+          marker = 'rootProject.name = "Launcher3"'
 
-              try:
-                  s = p.read_text()
-              except UnicodeDecodeError:
-                  continue
+          additions = """
+          include ':smartspacer-sdk-core'
+          include ':smartspacer-sdk-client'
 
-              new, n = re.subn(
-                  r'\s+android:featureFlag="[^"]*"',
-                  '',
-                  s
-              )
+          project(':smartspacer-sdk-core').projectDir =
+              new File(rootDir, 'smartspacer/sdk-core')
 
-              if n:
-                  p.write_text(new)
-                  files_changed += 1
-                  attributes_removed += n
-                  print(f"{p}: removed {n} featureFlag attribute(s)")
+          project(':smartspacer-sdk-client').projectDir =
+              new File(rootDir, 'smartspacer/sdk-client')
+          """
 
-          print(
-              f"Changed {files_changed} XML file(s), "
-              f"removed {attributes_removed} featureFlag attribute(s)."
-          )
+          if "include ':smartspacer-sdk-core'" not in s:
+              s = s.replace(marker, additions + "\n" + marker, 1)
+
+          p.write_text(s)
           PY
 
-          echo
-          echo "=== Checking remaining android:featureFlag attributes ==="
+          echo "=== Smartspacer settings ==="
 
-          if grep -RIn \
-            'android:featureFlag=' \
+          grep -n \
+            -E 'smartspacer-sdk-core|smartspacer-sdk-client' \
+            settings.gradle
+
+      - name: Patch Launcher3 Smartspacer dependency
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("build.gradle")
+          s = p.read_text()
+
+          anchor = "    implementation project(':sysui_anim_stub')"
+
+          addition = """
+          implementation project(':smartspacer-sdk-client')
+          """
+
+          if "implementation project(':smartspacer-sdk-client')" not in s:
+              if anchor not in s:
+                  raise SystemExit(
+                      "Could not find dependency insertion point in build.gradle"
+                  )
+
+              s = s.replace(
+                  anchor,
+                  anchor + addition,
+                  1
+              )
+
+          p.write_text(s)
+          PY
+
+          echo "=== Smartspacer dependency ==="
+
+          grep -n \
+            "smartspacer-sdk-client" \
+            build.gradle
+
+      - name: Fix Android private resources
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Patching private androidprv resource references..."
+
+          # Standalone Gradle builds do not expose AOSP's private
+          # androidprv framework resource namespace. Map these references
+          # to equivalent resources already supplied by the harness.
+          find . \
+            -type f \
+            -name "*.xml" \
+            -not -path "./.git/*" \
+            -print0 |
+          while IFS= read -r -d '' f; do
+
+            sed -i \
+              's#@androidprv:color/shade_panel_bg#@color/shade_panel_bg#g' \
+              "$f"
+
+            sed -i \
+              's#@androidprv:color/shade_panel_fg#@color/shade_panel_fg#g' \
+              "$f"
+
+            sed -i \
+              's#@androidprv:color/shade_panel_scrim_color#@color/shade_panel_scrim_color#g' \
+              "$f"
+
+            sed -i \
+              's#?androidprv:attr/colorAccentPrimary#?android:attr/colorAccent#g' \
+              "$f"
+
+            sed -i \
+              's#?androidprv:attr/textColorOnAccent#?android:attr/textColorPrimary#g' \
+              "$f"
+
+          done
+
+          echo
+          echo "=== Remaining androidprv references ==="
+
+          grep -RIn \
+            'androidprv:' \
             . \
             --include='*.xml' \
-            --exclude-dir=.git; then
-            echo "ERROR: android:featureFlag still exists." >&2
-            exit 1
-          fi
+            --exclude-dir=.git || true
 
-          echo "No android:featureFlag attributes remain."
+          # Define the private color names in the application namespace when
+          # they are not already supplied by the merged resources.
+          python3 - <<'PY'
+          from pathlib import Path
 
-          echo
-          echo "=== Fixing uwuAOSP main manifest for AGP 9 ==="
+          p = Path("res/values/standalone_private_resources.xml")
+          p.parent.mkdir(parents=True, exist_ok=True)
+
+          p.write_text("""<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="shade_panel_bg">#523C4043</color>
+              <color name="shade_panel_fg">#E6FFFFFF</color>
+              <color name="shade_panel_scrim_color">#99000000</color>
+          </resources>
+          """)
+          PY
+
+          echo "Private resource compatibility layer prepared."
+
+      - name: Fix Android 17 manifest for AGP 9
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
 
           python3 - <<'PY'
           from pathlib import Path
@@ -152,9 +399,62 @@ jobs:
           p.write_text(s)
           PY
 
-          echo
-          echo "=== Main manifest uses-sdk ==="
+          echo "=== Main manifest SDK declaration ==="
           grep -n "uses-sdk" AndroidManifest.xml || true
+
+      - name: Remove unsupported AAPT feature flags
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Removing android:featureFlag attributes..."
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          changed = 0
+          removed = 0
+
+          for p in Path(".").rglob("*.xml"):
+              if ".git" in p.parts:
+                  continue
+
+              try:
+                  s = p.read_text()
+              except UnicodeDecodeError:
+                  continue
+
+              new, n = re.subn(
+                  r'\s+android:featureFlag="[^"]*"',
+                  '',
+                  s
+              )
+
+              if n:
+                  p.write_text(new)
+                  changed += 1
+                  removed += n
+                  print(f"{p}: removed {n}")
+
+          print(
+              f"Changed XML files: {changed}; "
+              f"removed attributes: {removed}"
+          )
+          PY
+
+          if grep -RIn \
+            'android:featureFlag=' \
+            . \
+            --include='*.xml' \
+            --exclude-dir=.git; then
+
+            echo "ERROR: android:featureFlag remains." >&2
+            exit 1
+          fi
+
+          echo "No android:featureFlag attributes remain."
 
       - name: Fix Gradle repositories
         working-directory: launcher3-build
@@ -162,13 +462,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "=== Original Gradle repository configuration ==="
+          echo "=== Original repositories ==="
 
           grep -n -E \
             'maven.aliyun.com|repositories[[:space:]]*\{|google\(\)|mavenCentral\(\)|gradlePluginPortal\(\)' \
             settings.gradle || true
 
-          # Replace unreliable Aliyun mirrors with official repositories.
           sed -i \
             "s#https://maven.aliyun.com/repository/google#OFFICIAL_GOOGLE_REPO#g" \
             settings.gradle
@@ -194,11 +493,12 @@ jobs:
             settings.gradle
 
           echo
-          echo "=== Patched Gradle repository configuration ==="
+          echo "=== Patched repositories ==="
+
           cat settings.gradle
 
           echo
-          echo "=== Checking for remaining Aliyun mirrors ==="
+          echo "=== Remaining Aliyun references ==="
 
           if grep -RIn \
             "maven.aliyun.com/repository" \
@@ -207,7 +507,7 @@ jobs:
             --exclude='*.jar' \
             --exclude='*.aar'; then
 
-            echo "ERROR: Aliyun repository reference still exists." >&2
+            echo "ERROR: Aliyun Maven repository remains." >&2
             exit 1
           fi
 
@@ -238,8 +538,6 @@ jobs:
           command -v sdkmanager
           sdkmanager --version
 
-          # Android 17 / API 37.
-          # The GitHub runner exposes the platform as android-37.0.
           sdkmanager \
             "platform-tools" \
             "platforms;android-37.0" \
@@ -248,14 +546,12 @@ jobs:
           test -d "$ANDROID_SDK_ROOT/platforms/android-37.0"
           test -d "$ANDROID_SDK_ROOT/build-tools/37.0.0"
 
-          # AGP/harness expects canonical android-37.
           if [ ! -e "$ANDROID_SDK_ROOT/platforms/android-37" ]; then
             ln -s \
               "$ANDROID_SDK_ROOT/platforms/android-37.0" \
               "$ANDROID_SDK_ROOT/platforms/android-37"
           fi
 
-          # Keep API 37.
           sed -i \
             's/compileSdk[[:space:]]*36/compileSdk 37/g' \
             build.gradle
@@ -264,20 +560,18 @@ jobs:
             's/buildToolsVersion[[:space:]]*"36\.0\.0"/buildToolsVersion "37.0.0"/g' \
             build.gradle
 
-          # Remove stale SDK location from the imported Gradle harness.
           cat > local.properties <<EOF
           sdk.dir=$ANDROID_SDK_ROOT
           EOF
 
           echo
-          echo "=== Android SDK configuration ==="
+          echo "=== Android configuration ==="
 
           grep -nE \
             'compileSdk|buildToolsVersion' \
             build.gradle
 
           echo
-          echo "=== local.properties ==="
           cat local.properties
 
       - name: Generate debug keystore
@@ -291,8 +585,6 @@ jobs:
           mkdir -p "$DEBUG_DIR"
 
           if [ ! -s "$DEBUG_KEYSTORE" ]; then
-            echo "Generating Android debug keystore..."
-
             keytool \
               -genkeypair \
               -v \
@@ -304,14 +596,10 @@ jobs:
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000
-          else
-            echo "Debug keystore already exists."
           fi
 
           test -s "$DEBUG_KEYSTORE"
 
-          echo
-          echo "=== Debug keystore ==="
           ls -lh "$DEBUG_KEYSTORE"
 
       - name: Set up Gradle 9.7.1
@@ -335,7 +623,7 @@ jobs:
             --appId com.android.launcher3 \
             > generated-src/com/android/launcher3/BuildConfig.java
 
-          echo "=== Generated BuildConfig ==="
+          echo "=== BuildConfig ==="
 
           sed -n '1,120p' \
             generated-src/com/android/launcher3/BuildConfig.java
@@ -365,9 +653,26 @@ jobs:
             }
           done
 
-          echo "=== Framework prebuilts ==="
-
           ls -lh prebuilts/framework/
+
+      - name: Verify Smartspacer modules
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f smartspacer/sdk-core/build.gradle
+          test -f smartspacer/sdk-client/build.gradle
+          test -f smartspacer/sdk-client/src/main/AndroidManifest.xml
+          test -f smartspacer/sdk-core/src/main/AndroidManifest.xml
+          test -s smartspacer/balloon/balloon-1.6.13.aar
+
+          echo "Smartspacer SDK modules:"
+          find smartspacer \
+            -maxdepth 3 \
+            -type f \
+            \( -name "*.aar" -o -name "build.gradle" \) \
+            -print
 
       - name: Build Launcher3QuickStep
         working-directory: launcher3-build
