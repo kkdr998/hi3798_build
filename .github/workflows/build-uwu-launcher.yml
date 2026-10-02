@@ -75,35 +75,86 @@ jobs:
             uwu-launcher3/ \
             launcher3-build/
 
-      - name: Fix Android 17 manifest for AGP 9
+      - name: Fix Android 17 manifests and feature flags
         working-directory: launcher3-build
         shell: bash
         run: |
           set -euo pipefail
 
-          # AGP 9 rejects targetSdkVersion/minSdkVersion
-          # in the main AndroidManifest.xml <uses-sdk>.
-          # Keep tools:overrideLibrary, which remains supported.
+          echo "=== Removing unsupported android:featureFlag attributes ==="
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          files_changed = 0
+          attributes_removed = 0
+
+          for p in Path(".").rglob("*.xml"):
+              if ".git" in p.parts:
+                  continue
+
+              try:
+                  s = p.read_text()
+              except UnicodeDecodeError:
+                  continue
+
+              new, n = re.subn(
+                  r'\s+android:featureFlag="[^"]*"',
+                  '',
+                  s
+              )
+
+              if n:
+                  p.write_text(new)
+                  files_changed += 1
+                  attributes_removed += n
+                  print(f"{p}: removed {n} featureFlag attribute(s)")
+
+          print(
+              f"Changed {files_changed} XML file(s), "
+              f"removed {attributes_removed} featureFlag attribute(s)."
+          )
+          PY
+
+          echo
+          echo "=== Checking remaining android:featureFlag attributes ==="
+
+          if grep -RIn \
+            'android:featureFlag=' \
+            . \
+            --include='*.xml' \
+            --exclude-dir=.git; then
+            echo "ERROR: android:featureFlag still exists." >&2
+            exit 1
+          fi
+
+          echo "No android:featureFlag attributes remain."
+
+          echo
+          echo "=== Fixing uwuAOSP main manifest for AGP 9 ==="
+
           python3 - <<'PY'
           from pathlib import Path
 
           p = Path("AndroidManifest.xml")
           s = p.read_text()
 
-          old = '<uses-sdk android:targetSdkVersion="33" android:minSdkVersion="30"\n        tools:overrideLibrary="com.kieronquinn.app.smartspacer.sdk.client"/>'
+          old = '<uses-sdk android:targetSdkVersion="33" android:minSdkVersion="30"'
 
-          new = '<uses-sdk tools:overrideLibrary="com.kieronquinn.app.smartspacer.sdk.client"/>'
-
-          if old not in s:
-              raise SystemExit(
-                  "Expected uwuAOSP <uses-sdk> declaration was not found"
+          if old in s:
+              s = s.replace(
+                  old,
+                  '<uses-sdk',
+                  1
               )
 
-          p.write_text(s.replace(old, new, 1))
+          p.write_text(s)
           PY
 
-          echo "=== Manifest SDK declaration ==="
-          grep -n "uses-sdk" AndroidManifest.xml
+          echo
+          echo "=== Main manifest uses-sdk ==="
+          grep -n "uses-sdk" AndroidManifest.xml || true
 
       - name: Fix Gradle repositories
         working-directory: launcher3-build
@@ -188,7 +239,7 @@ jobs:
           sdkmanager --version
 
           # Android 17 / API 37.
-          # GitHub-hosted runners expose the platform as android-37.0.
+          # The GitHub runner exposes the platform as android-37.0.
           sdkmanager \
             "platform-tools" \
             "platforms;android-37.0" \
@@ -197,14 +248,14 @@ jobs:
           test -d "$ANDROID_SDK_ROOT/platforms/android-37.0"
           test -d "$ANDROID_SDK_ROOT/build-tools/37.0.0"
 
-          # AGP/harness expects the canonical android-37 directory.
+          # AGP/harness expects canonical android-37.
           if [ ! -e "$ANDROID_SDK_ROOT/platforms/android-37" ]; then
             ln -s \
               "$ANDROID_SDK_ROOT/platforms/android-37.0" \
               "$ANDROID_SDK_ROOT/platforms/android-37"
           fi
 
-          # Keep the build harness on API 37.
+          # Keep API 37.
           sed -i \
             's/compileSdk[[:space:]]*36/compileSdk 37/g' \
             build.gradle
@@ -213,7 +264,7 @@ jobs:
             's/buildToolsVersion[[:space:]]*"36\.0\.0"/buildToolsVersion "37.0.0"/g' \
             build.gradle
 
-          # Override a stale local.properties from the Gradle harness.
+          # Remove stale SDK location from the imported Gradle harness.
           cat > local.properties <<EOF
           sdk.dir=$ANDROID_SDK_ROOT
           EOF
@@ -228,14 +279,6 @@ jobs:
           echo
           echo "=== local.properties ==="
           cat local.properties
-
-          echo
-          echo "=== Installed Android platforms ==="
-          ls -la "$ANDROID_SDK_ROOT/platforms"
-
-          echo
-          echo "=== Installed build-tools ==="
-          ls -la "$ANDROID_SDK_ROOT/build-tools"
 
       - name: Generate debug keystore
         shell: bash
@@ -261,7 +304,6 @@ jobs:
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000
-
           else
             echo "Debug keystore already exists."
           fi
