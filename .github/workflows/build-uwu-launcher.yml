@@ -78,10 +78,8 @@ jobs:
           java-version: "21"
           cache: gradle
 
-      # Do NOT use android-actions/setup-android@v3 here.
-      # Its default package list still asks for the obsolete SDK "tools" package.
-      # GitHub's Ubuntu runner already provides a working sdkmanager.
       - name: Prepare Android SDK
+        working-directory: launcher3-build
         shell: bash
         run: |
           set -euo pipefail
@@ -96,15 +94,25 @@ jobs:
           command -v sdkmanager
           sdkmanager --version
 
-          yes | sdkmanager --licenses >/dev/null || true
-
           sdkmanager \
             "platform-tools" \
-            "platforms;android-37" \
-            "build-tools;37.0.0"
+            "platforms;android-36" \
+            "build-tools;36.0.0"
 
-          test -d "$ANDROID_SDK_ROOT/platforms/android-37"
-          test -d "$ANDROID_SDK_ROOT/build-tools/37.0.0"
+          test -d "$ANDROID_SDK_ROOT/platforms/android-36"
+          test -d "$ANDROID_SDK_ROOT/build-tools/36.0.0"
+
+          # 当前 GitHub Actions SDK 仓库没有 android-37，
+          # 将 Gradle harness 的编译 SDK 临时调整为可用的 API 36。
+          sed -i \
+            's/compileSdk[[:space:]]*37/compileSdk 36/g' \
+            build.gradle
+
+          sed -i \
+            's/buildToolsVersion[[:space:]]*"37\.0\.0"/buildToolsVersion "36.0.0"/g' \
+            build.gradle
+
+          grep -nE 'compileSdk|buildToolsVersion' build.gradle
 
       - name: Set up Gradle 9.7.1
         uses: gradle/actions/setup-gradle@v4
@@ -126,9 +134,6 @@ jobs:
             --pkg com.android.launcher3 \
             --appId com.android.launcher3 \
             > generated-src/com/android/launcher3/BuildConfig.java
-
-          sed -n '1,120p' \
-            generated-src/com/android/launcher3/BuildConfig.java
 
       - name: Check framework prebuilts
         working-directory: launcher3-build
