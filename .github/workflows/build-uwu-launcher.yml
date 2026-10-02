@@ -31,6 +31,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           git clone --depth=1 \
             https://github.com/yuchuangu85/Launcher3.git \
             launcher3-build
@@ -80,7 +81,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # AGP 9 rejects targetSdkVersion/minSdkVersion in the main manifest.
+          # AGP 9 rejects targetSdkVersion/minSdkVersion
+          # in the main AndroidManifest.xml <uses-sdk>.
           # Keep tools:overrideLibrary, which remains supported.
           python3 - <<'PY'
           from pathlib import Path
@@ -202,7 +204,7 @@ jobs:
               "$ANDROID_SDK_ROOT/platforms/android-37"
           fi
 
-          # Ensure API 37 is not accidentally downgraded.
+          # Keep the build harness on API 37.
           sed -i \
             's/compileSdk[[:space:]]*36/compileSdk 37/g' \
             build.gradle
@@ -210,6 +212,11 @@ jobs:
           sed -i \
             's/buildToolsVersion[[:space:]]*"36\.0\.0"/buildToolsVersion "37.0.0"/g' \
             build.gradle
+
+          # Override a stale local.properties from the Gradle harness.
+          cat > local.properties <<EOF
+          sdk.dir=$ANDROID_SDK_ROOT
+          EOF
 
           echo
           echo "=== Android SDK configuration ==="
@@ -219,14 +226,51 @@ jobs:
             build.gradle
 
           echo
-          echo "=== Installed Android platforms ==="
+          echo "=== local.properties ==="
+          cat local.properties
 
+          echo
+          echo "=== Installed Android platforms ==="
           ls -la "$ANDROID_SDK_ROOT/platforms"
 
           echo
           echo "=== Installed build-tools ==="
-
           ls -la "$ANDROID_SDK_ROOT/build-tools"
+
+      - name: Generate debug keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEBUG_DIR="$HOME/.config/.android"
+          DEBUG_KEYSTORE="$DEBUG_DIR/debug.keystore"
+
+          mkdir -p "$DEBUG_DIR"
+
+          if [ ! -s "$DEBUG_KEYSTORE" ]; then
+            echo "Generating Android debug keystore..."
+
+            keytool \
+              -genkeypair \
+              -v \
+              -keystore "$DEBUG_KEYSTORE" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000
+
+          else
+            echo "Debug keystore already exists."
+          fi
+
+          test -s "$DEBUG_KEYSTORE"
+
+          echo
+          echo "=== Debug keystore ==="
+          ls -lh "$DEBUG_KEYSTORE"
 
       - name: Set up Gradle 9.7.1
         uses: gradle/actions/setup-gradle@v4
@@ -304,7 +348,7 @@ jobs:
               ;;
           esac
 
-          echo "Building Gradle task: $TASK"
+          echo "Building: $TASK"
 
           gradle \
             --no-daemon \
