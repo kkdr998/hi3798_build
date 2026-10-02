@@ -1,6 +1,7 @@
 name: Build uwuAOSP Launcher3QuickStep (Android 17)
 
 on:
+  push:
   workflow_dispatch:
     inputs:
       uwu_ref:
@@ -30,7 +31,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           git clone --depth=1 \
             https://github.com/yuchuangu85/Launcher3.git \
             launcher3-build
@@ -38,7 +38,7 @@ jobs:
       - name: Fetch exact uwuAOSP Launcher3 source
         shell: bash
         env:
-          UWU_REF: ${{ inputs.uwu_ref }}
+          UWU_REF: ${{ inputs.uwu_ref || '263331a9f9701a7ee1e74be5b95b68bb2153ad7e' }}
         run: |
           set -euo pipefail
 
@@ -74,6 +74,35 @@ jobs:
             uwu-launcher3/ \
             launcher3-build/
 
+      - name: Fix Android 17 manifest for AGP 9
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # AGP 9 rejects targetSdkVersion/minSdkVersion in the main manifest.
+          # Keep tools:overrideLibrary, which remains supported.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("AndroidManifest.xml")
+          s = p.read_text()
+
+          old = '<uses-sdk android:targetSdkVersion="33" android:minSdkVersion="30"\n        tools:overrideLibrary="com.kieronquinn.app.smartspacer.sdk.client"/>'
+
+          new = '<uses-sdk tools:overrideLibrary="com.kieronquinn.app.smartspacer.sdk.client"/>'
+
+          if old not in s:
+              raise SystemExit(
+                  "Expected uwuAOSP <uses-sdk> declaration was not found"
+              )
+
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+          echo "=== Manifest SDK declaration ==="
+          grep -n "uses-sdk" AndroidManifest.xml
+
       - name: Fix Gradle repositories
         working-directory: launcher3-build
         shell: bash
@@ -81,13 +110,12 @@ jobs:
           set -euo pipefail
 
           echo "=== Original Gradle repository configuration ==="
+
           grep -n -E \
             'maven.aliyun.com|repositories[[:space:]]*\{|google\(\)|mavenCentral\(\)|gradlePluginPortal\(\)' \
             settings.gradle || true
 
-          # yuchuangu85/Launcher3 使用了 Aliyun 镜像。
-          # 当前 Actions 环境访问该镜像可能返回 502，
-          # 因此统一切换到官方/标准 Maven 仓库。
+          # Replace unreliable Aliyun mirrors with official repositories.
           sed -i \
             "s#https://maven.aliyun.com/repository/google#OFFICIAL_GOOGLE_REPO#g" \
             settings.gradle
@@ -118,12 +146,14 @@ jobs:
 
           echo
           echo "=== Checking for remaining Aliyun mirrors ==="
+
           if grep -RIn \
             "maven.aliyun.com/repository" \
             . \
             --exclude-dir=.git \
             --exclude='*.jar' \
             --exclude='*.aar'; then
+
             echo "ERROR: Aliyun repository reference still exists." >&2
             exit 1
           fi
@@ -144,36 +174,59 @@ jobs:
           set -euo pipefail
 
           export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
 
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
 
           command -v sdkmanager
           sdkmanager --version
 
+          # Android 17 / API 37.
+          # GitHub-hosted runners expose the platform as android-37.0.
           sdkmanager \
             "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
+            "platforms;android-37.0" \
+            "build-tools;37.0.0"
 
-          test -d "$ANDROID_SDK_ROOT/platforms/android-36"
-          test -d "$ANDROID_SDK_ROOT/build-tools/36.0.0"
+          test -d "$ANDROID_SDK_ROOT/platforms/android-37.0"
+          test -d "$ANDROID_SDK_ROOT/build-tools/37.0.0"
 
-          # 当前 GitHub Actions SDK 仓库没有 android-37，
-          # 将 Gradle harness 的编译 SDK 临时调整为可用的 API 36。
+          # AGP/harness expects the canonical android-37 directory.
+          if [ ! -e "$ANDROID_SDK_ROOT/platforms/android-37" ]; then
+            ln -s \
+              "$ANDROID_SDK_ROOT/platforms/android-37.0" \
+              "$ANDROID_SDK_ROOT/platforms/android-37"
+          fi
+
+          # Ensure API 37 is not accidentally downgraded.
           sed -i \
-            's/compileSdk[[:space:]]*37/compileSdk 36/g' \
+            's/compileSdk[[:space:]]*36/compileSdk 37/g' \
             build.gradle
 
           sed -i \
-            's/buildToolsVersion[[:space:]]*"37\.0\.0"/buildToolsVersion "36.0.0"/g' \
+            's/buildToolsVersion[[:space:]]*"36\.0\.0"/buildToolsVersion "37.0.0"/g' \
             build.gradle
 
           echo
           echo "=== Android SDK configuration ==="
-          grep -nE 'compileSdk|buildToolsVersion' build.gradle
+
+          grep -nE \
+            'compileSdk|buildToolsVersion' \
+            build.gradle
+
+          echo
+          echo "=== Installed Android platforms ==="
+
+          ls -la "$ANDROID_SDK_ROOT/platforms"
+
+          echo
+          echo "=== Installed build-tools ==="
+
+          ls -la "$ANDROID_SDK_ROOT/build-tools"
 
       - name: Set up Gradle 9.7.1
         uses: gradle/actions/setup-gradle@v4
@@ -196,7 +249,8 @@ jobs:
             --appId com.android.launcher3 \
             > generated-src/com/android/launcher3/BuildConfig.java
 
-          echo "Generated:"
+          echo "=== Generated BuildConfig ==="
+
           sed -n '1,120p' \
             generated-src/com/android/launcher3/BuildConfig.java
 
@@ -226,13 +280,14 @@ jobs:
           done
 
           echo "=== Framework prebuilts ==="
+
           ls -lh prebuilts/framework/
 
       - name: Build Launcher3QuickStep
         working-directory: launcher3-build
         shell: bash
         env:
-          BUILD_TYPE: ${{ inputs.build_type }}
+          BUILD_TYPE: ${{ inputs.build_type || 'Release' }}
         run: |
           set -euo pipefail
 
@@ -281,7 +336,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: uwuAOSP-Launcher3QuickStep-${{ inputs.build_type }}-${{ github.run_number }}
+          name: uwuAOSP-Launcher3QuickStep-${{ inputs.build_type || 'Release' }}-${{ github.run_number }}
           path: |
             launcher3-build/build/outputs/apk/**/*.apk
           if-no-files-found: error
