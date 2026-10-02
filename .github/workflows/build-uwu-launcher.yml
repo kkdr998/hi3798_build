@@ -1,0 +1,141 @@
+name: Build uwuAOSP Launcher3QuickStep (Android 17)
+
+on:
+  workflow_dispatch:
+    inputs:
+      uwu_ref:
+        description: 'uwuAOSP Launcher3 commit/tag/branch'
+        required: true
+        default: '263331a9f9701a7ee1e74be5b95b68bb2153ad7e'
+        type: string
+      build_type:
+        description: 'Gradle build type'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout build harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/yuchuangu85/Launcher3.git launcher3-build
+
+      - name: Fetch exact uwuAOSP Launcher3 source
+        shell: bash
+        env:
+          UWU_REF: ${{ inputs.uwu_ref }}
+        run: |
+          set -euo pipefail
+          git init uwu-launcher3
+          cd uwu-launcher3
+          git remote add origin https://github.com/uwuAOSP/platform_packages_apps_Launcher3.git
+          git fetch --depth=1 origin "$UWU_REF"
+          git checkout --detach FETCH_HEAD
+          echo "UWU_SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Show source revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "uwuAOSP Launcher3: ${UWU_SOURCE_SHA}"
+          git -C launcher3-build rev-parse HEAD
+
+      - name: Overlay uwuAOSP Launcher3 onto Gradle build harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --exclude='.git' uwu-launcher3/ launcher3-build/
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 17 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            'platform-tools' \
+            'platforms;android-37' \
+            'build-tools;37.0.0'
+
+      - name: Set up Gradle 9.7.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.7.1'
+          cache-read-only: false
+
+      - name: Generate standalone BuildConfig
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x tools/buildconfig.sh
+          mkdir -p generated-src/com/android/launcher3
+          tools/buildconfig.sh \
+            --pkg com.android.launcher3 \
+            --appId com.android.launcher3 \
+            > generated-src/com/android/launcher3/BuildConfig.java
+          test -s generated-src/com/android/launcher3/BuildConfig.java
+
+      - name: Build Launcher3QuickStep
+        working-directory: launcher3-build
+        shell: bash
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+        run: |
+          set -euo pipefail
+          case "$BUILD_TYPE" in
+            Debug)   TASK='assembleWithquickstepDebug' ;;
+            Release) TASK='assembleWithquickstepRelease' ;;
+            *) echo "Unsupported build type: $BUILD_TYPE" >&2; exit 2 ;;
+          esac
+          gradle --no-daemon --stacktrace --warning-mode all "$TASK"
+
+      - name: Locate APK
+        working-directory: launcher3-build
+        shell: bash
+        run: |
+          set -euo pipefail
+          find build/outputs/apk -type f -name '*.apk' -print
+          test -n "$(find build/outputs/apk -type f -name '*.apk' -print -quit)"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: uwuAOSP-Launcher3QuickStep-${{ inputs.build_type }}-${{ github.run_number }}
+          path: |
+            launcher3-build/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload mapping/logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uwuAOSP-Launcher3QuickStep-failure-${{ github.run_number }}
+          path: |
+            launcher3-build/build/reports/**
+            launcher3-build/build/outputs/logs/**
+            launcher3-build/build/outputs/mapping/**
+          if-no-files-found: ignore
+          retention-days: 7
