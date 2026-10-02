@@ -107,6 +107,7 @@ jobs:
           plugins {
               id 'com.android.library'
               id 'org.jetbrains.kotlin.android'
+              id 'kotlin-parcelize'
           }
 
           android {
@@ -157,6 +158,7 @@ jobs:
           plugins {
               id 'com.android.library'
               id 'org.jetbrains.kotlin.android'
+              id 'kotlin-parcelize'
           }
 
           android {
@@ -657,7 +659,7 @@ jobs:
           echo "=== Smartspacer modules ==="
 
           grep -n \
-            -E 'compileSdkVersion|buildToolsVersion|dependencies|implementation|api' \
+            -E 'compileSdkVersion|buildToolsVersion|kotlin-parcelize|dependencies|implementation|api' \
             smartspacer/sdk-core/build.gradle \
             smartspacer/sdk-client/build.gradle
 
